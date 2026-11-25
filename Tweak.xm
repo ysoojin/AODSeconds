@@ -12,7 +12,7 @@ static NSObject *guard;
 static os_log_t logger;
 static std::atomic<unsigned> events{0};
 static void record(NSString *s) {
-    if (++events > 800) return;
+    if (++events > 1200) return;
     os_log(logger,"%{public}@",s);
     @synchronized(guard) {
         NSFileHandle *h=[NSFileHandle fileHandleForWritingAtPath:path];
@@ -83,6 +83,60 @@ static NSString *secondsString(id original, NSDate *date) {
     NSInteger second=[[NSCalendar currentCalendar] component:NSCalendarUnitSecond fromDate:date];
     return [NSString stringWithFormat:@"%@:%@:%ld",parts[0],parts[1],(long)second];
 }
+static std::atomic<unsigned> timelineProbes{0};
+static NSMutableSet *timelineClasses;
+static void inspectTimeline(id value, unsigned depth) {
+    if(!value || depth>3) return;
+    if([value isKindOfClass:[NSArray class]] || [value isKindOfClass:[NSSet class]]) {
+        record([NSString stringWithFormat:@"CLOCK TIMELINE container=%@ count=%lu",NSStringFromClass([value class]),(unsigned long)[value count]]);
+        unsigned i=0; for(id item in value) { if(i++>=3) break; inspectTimeline(item,depth+1); } return;
+    }
+    if([value isKindOfClass:[NSDictionary class]]) {
+        record([NSString stringWithFormat:@"CLOCK TIMELINE dictionary count=%lu",(unsigned long)[value count]]);
+        unsigned i=0; for(id key in value) { if(i++>=3) break; inspectTimeline([value objectForKey:key],depth+1); } return;
+    }
+    if([value isKindOfClass:[NSDate class]] || [value isKindOfClass:[NSDateInterval class]]) {
+        record([NSString stringWithFormat:@"CLOCK TIMELINE date=%@",value]); return;
+    }
+    Class cls=object_getClass(value);
+    NSString *name=NSStringFromClass(cls);
+    record([NSString stringWithFormat:@"CLOCK TIMELINE object=%@",name]);
+    BOOL fresh=NO;
+    @synchronized(guard) {
+        if(!timelineClasses) timelineClasses=[NSMutableSet new];
+        if(![timelineClasses containsObject:name] && timelineClasses.count<12) { [timelineClasses addObject:name]; fresh=YES; }
+    }
+    if(fresh) {
+        unsigned n=0; Method *ms=class_copyMethodList(cls,&n);
+        for(unsigned i=0;i<MIN(n,60);i++) record([NSString stringWithFormat:@"TIMELINE API %@ %@ %s",name,NSStringFromSelector(method_getName(ms[i])),method_getTypeEncoding(ms[i])]);
+        free(ms);
+        Ivar *iv=class_copyIvarList(cls,&n);
+        for(unsigned i=0;i<MIN(n,30);i++) record([NSString stringWithFormat:@"TIMELINE IVAR %@ %s %s",name,ivar_getName(iv[i]),ivar_getTypeEncoding(iv[i])]);
+        free(iv);
+    }
+    const char *getters[]={"entries","entrySpecifiers","dateSpecifiers","dates","dateInterval","presentationInterval","date","startDate","endDate"};
+    for(const char *getter:getters) {
+        id child=objectGetter(value,getter);
+        if(child && child!=value && ([child isKindOfClass:[NSArray class]] || [child isKindOfClass:[NSDictionary class]] || [child isKindOfClass:[NSSet class]] || [child isKindOfClass:[NSDate class]] || [child isKindOfClass:[NSDateInterval class]])) {
+            record([NSString stringWithFormat:@"TIMELINE GET %@ %s",name,getter]);
+            inspectTimeline(child,depth+1);
+        }
+    }
+}
+%group ClockTimeline
+%hook SBFLockScreenDateViewController
+- (id)_timelinesForDateInterval:(id)interval {
+    id result=%orig;
+    if(++timelineProbes<=3) {
+        @try {
+            record([NSString stringWithFormat:@"CLOCK TIMELINE request=%@ resultClass=%@",[interval isKindOfClass:[NSDateInterval class]]?interval:@"unknown",NSStringFromClass([result class])]);
+            inspectTimeline(result,0);
+        } @catch(NSException *e) { record(@"CLOCK TIMELINE inspection exception"); }
+    }
+    return result;
+}
+%end
+%end
 %group ClockController
 %hook SBFLockScreenDateViewController
 - (void)_updateWithFrameSpecifier:(id)specifier {
@@ -134,6 +188,10 @@ static NSString *secondsString(id original, NSDate *date) {
 %end
 static void installClock(void) {
     Class c=objc_getClass("SBFLockScreenDateViewController");
+    if(matches(c,@selector(_timelinesForDateInterval:),"@24@0:8@16")) {
+        %init(ClockTimeline,SBFLockScreenDateViewController=c);
+        record(@"CLOCK timeline hook installed");
+    } else record(@"CLOCK timeline signature unavailable");
     if(matches(c,@selector(_updateWithFrameSpecifier:),"v24@0:8@16")) {
         %init(ClockController,SBFLockScreenDateViewController=c);
         record(@"CLOCK controller hook installed");
@@ -144,7 +202,7 @@ static void installClock(void) {
         record(@"CLOCK prominent hook installed");
     } else record(@"CLOCK prominent signature unavailable");
 }
-static NSArray *experiment(NSArray *items, id interval) {
+static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) {
     if (items.count != 11 || ![interval isKindOfClass:[NSDateInterval class]]) return items;
     uint64_t now=mach_continuous_time(), zero=0;
     began.compare_exchange_strong(zero,now);
@@ -220,7 +278,7 @@ static NSArray *experiment(NSArray *items, id interval) {
     NSString *range=[interval isKindOfClass:[NSDateInterval class]] ? [NSString stringWithFormat:@"%@ to %@ duration=%.3f",[(NSDateInterval *)interval startDate],[(NSDateInterval *)interval endDate],[(NSDateInterval *)interval duration]] : NSStringFromClass([interval class]);
     NSUInteger n=[specifiers isKindOfClass:[NSArray class]] ? [(NSArray *)specifiers count] : 0;
     record([NSString stringWithFormat:@"REGISTER count=%lu interval=%@",(unsigned long)n,range]);
-    id output=[specifiers isKindOfClass:[NSArray class]] ? experiment(specifiers,interval) : specifiers;
+    id output=specifiers;
     %orig(output,interval);
 }
 - (id)specifierForDate:(id)date {
@@ -253,7 +311,7 @@ static NSArray *experiment(NSArray *items, id interval) {
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.2.3 - bounded immediate 30-second timeline experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.2.4 - native clock timeline diagnostic\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
