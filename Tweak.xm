@@ -57,7 +57,8 @@ static void ASLayout(UIView *v) {
     }
     CGFloat h = ceil(l.font.lineHeight);
     CGFloat w = ceil([@":59" sizeWithAttributes:@{NSFontAttributeName:l.font}].width)+4;
-    l.frame = CGRectMake(CGRectGetMaxX(r)+2, CGRectGetMaxY(r)-h+(clock ? clock.font.descender-l.font.descender : 0), w, h);
+    l.frame = CGRectMake(MAX(CGRectGetMinX(v.bounds), MIN(CGRectGetMaxX(r)+2, CGRectGetMaxX(v.bounds)-w)), MAX(CGRectGetMinY(v.bounds), MIN(CGRectGetMaxY(r)-h+(clock ? clock.font.descender-l.font.descender : 0), CGRectGetMaxY(v.bounds)-h)), w, h);
+    [v bringSubviewToFront:l];
     if (objc_getAssociatedObject(v,&kStarted) || !ASVisible(v)) return;
     objc_setAssociatedObject(v,&kStarted,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ASUpdate(l);
@@ -110,10 +111,16 @@ static void ASLayout(UIView *v) {
 %ctor {
     @autoreleasepool {
         ASLog = os_log_create("com.aodseconds.experimental","probe");
+        NSBundle *cover = [NSBundle bundleWithPath:@"/System/Library/PrivateFrameworks/CoverSheet.framework"];
+        [cover load];
+        NSBundle *kit = [NSBundle bundleWithPath:@"/System/Library/PrivateFrameworks/CoverSheetKit.framework"];
+        [kit load];
         Class clock = objc_getClass("CSProminentTimeView");
         if (clock && [clock isSubclassOfClass:UIView.class]) {
             %init(ClockProbe, CSProminentTimeView = clock);
             os_log(ASLog,"hook installed; AOD engine class present=%{public}d",objc_getClass("BLSHAlwaysOnPresentationEngine") != Nil);
+        } else {
+            os_log_error(ASLog,"CSProminentTimeView unavailable");
         }
     }
 }
