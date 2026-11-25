@@ -32,24 +32,90 @@ static std::atomic<uint64_t> began{0};
 static mach_timebase_info_data_t tb;
 static std::atomic<unsigned> budgetLogs{0};
 static std::atomic<bool> scanned{false};
-static void scanClock(void) {
-    unsigned n=0; Class *classes=objc_copyClassList(&n);
-    unsigned found=0;
-    for(unsigned i=0;i<n && found<45;i++) {
-        NSString *name=NSStringFromClass(classes[i]);
-        if(!([name containsString:@"Clock"] || [name containsString:@"DateView"] || [name containsString:@"TimeView"])) continue;
-        if(!([name hasPrefix:@"SB"] || [name hasPrefix:@"CS"] || [name hasPrefix:@"CST"] || [name hasPrefix:@"SBU"] || [name hasPrefix:@"Lock"])) continue;
-        found++;
-        record([NSString stringWithFormat:@"CLOCK CLASS %@",name]);
-        unsigned m=0; Method *ms=class_copyMethodList(classes[i],&m);
-        for(unsigned j=0;j<m;j++) {
-            NSString *s=NSStringFromSelector(method_getName(ms[j]));
-            NSString *l=s.lowercaseString;
-            if([l containsString:@"time"] || [l containsString:@"date"] || [l containsString:@"second"] || [l containsString:@"fidelity"] || [l containsString:@"alwayson"] || [l containsString:@"format"] || [l containsString:@"update"]) record([NSString stringWithFormat:@"CLOCK API %@ %@ %s",name,s,method_getTypeEncoding(ms[j])]);
-        }
-        free(ms);
-    }
-    free(classes);
+static NSDate *frameDate;
+static std::atomic<unsigned> clockCalls{0};
+static id objectGetter(id obj, const char *name) {
+    if (!obj) return nil;
+    SEL sel=sel_registerName(name);
+    if (!matches(object_getClass(obj),sel,"@16@0:8")) return nil;
+    return ((id(*)(id,SEL))objc_msgSend)(obj,sel);
+}
+static NSDate *dateFromFrame(id frame) {
+    if ([frame isKindOfClass:[NSDate class]]) return frame;
+    id value=objectGetter(frame,"date");
+    if (![value isKindOfClass:[NSDate class]]) value=objectGetter(frame,"presentationDate");
+    if (![value isKindOfClass:[NSDate class]]) value=objectGetter(objectGetter(frame,"dateSpecifier"),"date");
+    return [value isKindOfClass:[NSDate class]] ? value : nil;
+}
+static NSString *secondsString(id original, NSDate *date) {
+    if (![original isKindOfClass:[NSString class]] || !date) return original;
+    NSString *s=original;
+    NSRegularExpression *re=[NSRegularExpression regularExpressionWithPattern:@"^[0-9]{1,2}:[0-9]{2}(:[0-9]{1,2})?$" options:0 error:NULL];
+    if (![re numberOfMatchesInString:s options:0 range:NSMakeRange(0,s.length)]) return s;
+    NSArray *parts=[s componentsSeparatedByString:@":"];
+    NSInteger second=[[NSCalendar currentCalendar] component:NSCalendarUnitSecond fromDate:date];
+    return [NSString stringWithFormat:@"%@:%@:%ld",parts[0],parts[1],(long)second];
+}
+%group ClockController
+%hook SBFLockScreenDateViewController
+- (void)_updateWithFrameSpecifier:(id)specifier {
+    NSDate *date=dateFromFrame(specifier);
+    BOOL scoped=[NSThread isMainThread] && date && [date timeIntervalSinceNow]>-60 && [date timeIntervalSinceNow]<610;
+    if (++clockCalls<=80) record([NSString stringWithFormat:@"CLOCK FRAME class=%@ date=%@ scoped=%d",NSStringFromClass([specifier class]),date,scoped]);
+    if (!scoped) { %orig; return; }
+    NSDate *previous=frameDate;
+    frameDate=date;
+    @try {
+        %orig;
+        id view=objectGetter(self,"dateViewIfExists");
+        id label=objectGetter(view,"_timeLabel");
+        if ([label isKindOfClass:[UILabel class]]) {
+            UILabel *l=(UILabel *)label;
+            NSString *before=l.text;
+            NSString *after=secondsString(before,date);
+            if (after && ![after isEqualToString:before]) {
+                NSAttributedString *attr=l.attributedText;
+                if(attr.length && [attr.string isEqualToString:before]) {
+                    NSMutableAttributedString *copy=[attr mutableCopy];
+                    NSArray *parts=[before componentsSeparatedByString:@":"];
+                    if(parts.count==3) {
+                        NSRange last=[before rangeOfString:@":" options:NSBackwardsSearch];
+                        [copy replaceCharactersInRange:NSMakeRange(last.location,before.length-last.location) withString:[after substringFromIndex:last.location]];
+                    } else {
+                        NSDictionary *style=[attr attributesAtIndex:attr.length-1 effectiveRange:NULL];
+                        [copy appendAttributedString:[[NSAttributedString alloc] initWithString:[after substringFromIndex:before.length] attributes:style]];
+                    }
+                    l.attributedText=copy;
+                } else l.text=after;
+                record([NSString stringWithFormat:@"CLOCK LABEL %@ -> %@",before,after]);
+            } else record([NSString stringWithFormat:@"CLOCK LABEL unchanged %@",before]);
+        } else record([NSString stringWithFormat:@"CLOCK LABEL unavailable class=%@",NSStringFromClass([label class])]);
+    } @finally { frameDate=previous; }
+}
+%end
+%end
+%group ProminentClock
+%hook CSProminentTimeView
+- (id)_timeString {
+    id original=%orig;
+    if (![NSThread isMainThread] || !frameDate) return original;
+    NSString *out=secondsString(original,frameDate);
+    if (out && ![out isEqual:original]) record([NSString stringWithFormat:@"CLOCK STRING %@ -> %@",original,out]);
+    return out;
+}
+%end
+%end
+static void installClock(void) {
+    Class c=objc_getClass("SBFLockScreenDateViewController");
+    if(matches(c,@selector(_updateWithFrameSpecifier:),"v24@0:8@16")) {
+        %init(ClockController,SBFLockScreenDateViewController=c);
+        record(@"CLOCK controller hook installed");
+    } else record(@"CLOCK controller signature unavailable");
+    Class p=objc_getClass("CSProminentTimeView");
+    if(matches(p,@selector(_timeString),"@16@0:8")) {
+        %init(ProminentClock,CSProminentTimeView=p);
+        record(@"CLOCK prominent hook installed");
+    } else record(@"CLOCK prominent signature unavailable");
 }
 static NSArray *experiment(NSArray *items, id interval) {
     if (items.count != 11 || ![interval isKindOfClass:[NSDateInterval class]]) return items;
@@ -149,10 +215,10 @@ static NSArray *experiment(NSArray *items, id interval) {
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.1.9 - bounded repeat timeline and clock API diagnostic\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.2.0 - scoped frame clock formatting experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
-        dispatch_async(dispatch_get_main_queue(), ^{ scanClock(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
         Class e=objc_getClass("BLSHAlwaysOnPresentationEngine");
         if(matches(e,@selector(startFlipbookAndEnsureCurrent),"v16@0:8") && matches(e,@selector(startLiveUpdates),"v16@0:8")) {
             %init(Engine,BLSHAlwaysOnPresentationEngine=e);
