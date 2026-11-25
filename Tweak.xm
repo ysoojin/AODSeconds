@@ -1,4 +1,6 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <mach/mach_time.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <os/log.h>
@@ -9,7 +11,7 @@ static NSObject *guard;
 static os_log_t logger;
 static std::atomic<unsigned> events{0};
 static void record(NSString *s) {
-    if (++events > 350) return;
+    if (++events > 800) return;
     os_log(logger,"%{public}@",s);
     @synchronized(guard) {
         NSFileHandle *h=[NSFileHandle fileHandleForWritingAtPath:path];
@@ -25,13 +27,38 @@ static BOOL matches(Class cls, SEL sel, const char *encoding) {
     Method m=cls ? class_getInstanceMethod(cls,sel) : NULL;
     return m && strcmp(method_getTypeEncoding(m),encoding)==0;
 }
-static std::atomic<bool> attempted{false};
+static std::atomic<unsigned> batches{0};
+static std::atomic<uint64_t> began{0};
+static mach_timebase_info_data_t tb;
+static std::atomic<unsigned> budgetLogs{0};
+static std::atomic<bool> scanned{false};
+static void scanClock(void) {
+    unsigned n=0; Class *classes=objc_copyClassList(&n);
+    unsigned found=0;
+    for(unsigned i=0;i<n && found<45;i++) {
+        NSString *name=NSStringFromClass(classes[i]);
+        if(!([name containsString:@"Clock"] || [name containsString:@"DateView"] || [name containsString:@"TimeView"])) continue;
+        if(!([name hasPrefix:@"SB"] || [name hasPrefix:@"CS"] || [name hasPrefix:@"CST"] || [name hasPrefix:@"SBU"] || [name hasPrefix:@"Lock"])) continue;
+        found++;
+        record([NSString stringWithFormat:@"CLOCK CLASS %@",name]);
+        unsigned m=0; Method *ms=class_copyMethodList(classes[i],&m);
+        for(unsigned j=0;j<m;j++) {
+            NSString *s=NSStringFromSelector(method_getName(ms[j]));
+            NSString *l=s.lowercaseString;
+            if([l containsString:@"time"] || [l containsString:@"date"] || [l containsString:@"second"] || [l containsString:@"fidelity"] || [l containsString:@"alwayson"] || [l containsString:@"format"] || [l containsString:@"update"]) record([NSString stringWithFormat:@"CLOCK API %@ %@ %s",name,s,method_getTypeEncoding(ms[j])]);
+        }
+        free(ms);
+    }
+    free(classes);
+}
 static NSArray *experiment(NSArray *items, id interval) {
     if (items.count != 11 || ![interval isKindOfClass:[NSDateInterval class]]) return items;
-    if (attempted.exchange(true)) return items;
+    uint64_t now=mach_continuous_time(), zero=0;
+    began.compare_exchange_strong(zero,now);
+    if((double)(now-began.load())*tb.numer/tb.denom/1e9>120 || batches.load()>=6) return items;
     Class cls=objc_getClass("BLSAlwaysOnDateSpecifier");
     if (!cls) { record(@"SKIP no specifier class"); return items; }
-    for(int meta=0;meta<2;meta++){
+    if(!scanned.exchange(true)) for(int meta=0;meta<2;meta++){
         unsigned n=0; Method *ms=class_copyMethodList(meta?object_getClass(cls):cls,&n);
         for(unsigned i=0;i<n;i++) record([NSString stringWithFormat:@"API %c %@ %s",meta?'+':'-',NSStringFromSelector(method_getName(ms[i])),method_getTypeEncoding(ms[i])]);
         free(ms);
@@ -66,7 +93,8 @@ static NSArray *experiment(NSArray *items, id interval) {
             if(!frame || [frame class]!=cls || ![getDate(frame,dateSel) isEqual:date] || getFidelity(frame,fidelitySel)!=1) { record(@"SKIP factory result mismatch"); return items; }
             [out insertObject:frame atIndex:i];
         }
-        record(@"EXPERIMENT registered five extra one-second specifiers; original entries preserved");
+        if(batches.fetch_add(1)>=6) return items;
+        record([NSString stringWithFormat:@"EXPERIMENT batch=%u five extra specifiers %@ to %@",batches.load(),getDate(out[1],dateSel),getDate(out[5],dateSel)]);
         return out;
     } @catch(NSException *e) { record(@"SKIP exception; original timeline retained"); return items; }
 }
@@ -88,13 +116,6 @@ static NSArray *experiment(NSArray *items, id interval) {
     NSString *range=[interval isKindOfClass:[NSDateInterval class]] ? [NSString stringWithFormat:@"%@ to %@ duration=%.3f",[(NSDateInterval *)interval startDate],[(NSDateInterval *)interval endDate],[(NSDateInterval *)interval duration]] : NSStringFromClass([interval class]);
     NSUInteger n=[specifiers isKindOfClass:[NSArray class]] ? [(NSArray *)specifiers count] : 0;
     record([NSString stringWithFormat:@"REGISTER count=%lu interval=%@",(unsigned long)n,range]);
-    if(n) {
-        NSArray *a=specifiers;
-        for(NSUInteger i=0;i<MIN(n,8);i++) {
-            id item=a[i];
-            record([NSString stringWithFormat:@"SPEC class=%@",NSStringFromClass([item class])]);
-        }
-    }
     id output=[specifiers isKindOfClass:[NSArray class]] ? experiment(specifiers,interval) : specifiers;
     %orig(output,interval);
 }
@@ -109,7 +130,7 @@ static NSArray *experiment(NSArray *items, id interval) {
 %hook BLSHInactiveProcessMinutesBudget
 - (long long)allowedFidelityAtDate:(id)date expectedFidelity:(long long)expected {
     long long actual=%orig;
-    record([NSString stringWithFormat:@"FIDELITY date=%@ expected=%lld actual=%lld",[date isKindOfClass:[NSDate class]] ? date : @"unknown",expected,actual]);
+    if(++budgetLogs<=12) record([NSString stringWithFormat:@"FIDELITY date=%@ expected=%lld actual=%lld",[date isKindOfClass:[NSDate class]] ? date : @"unknown",expected,actual]);
     return actual;
 }
 %end
@@ -128,8 +149,10 @@ static NSArray *experiment(NSArray *items, id interval) {
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.1.8 - verified initializer five-frame experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.1.9 - bounded repeat timeline and clock API diagnostic\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        mach_timebase_info(&tb);
         record(@"INJECTED");
+        dispatch_async(dispatch_get_main_queue(), ^{ scanClock(); });
         Class e=objc_getClass("BLSHAlwaysOnPresentationEngine");
         if(matches(e,@selector(startFlipbookAndEnsureCurrent),"v16@0:8") && matches(e,@selector(startLiveUpdates),"v16@0:8")) {
             %init(Engine,BLSHAlwaysOnPresentationEngine=e);
