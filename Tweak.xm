@@ -6,6 +6,7 @@
 #import <os/log.h>
 #include <atomic>
 #include <string.h>
+#include <math.h>
 static NSString *path;
 static NSObject *guard;
 static os_log_t logger;
@@ -147,7 +148,7 @@ static NSArray *experiment(NSArray *items, id interval) {
     if (items.count != 11 || ![interval isKindOfClass:[NSDateInterval class]]) return items;
     uint64_t now=mach_continuous_time(), zero=0;
     began.compare_exchange_strong(zero,now);
-    if((double)(now-began.load())*tb.numer/tb.denom/1e9>120 || batches.load()>=6) return items;
+    if((double)(now-began.load())*tb.numer/tb.denom/1e9>120 || batches.load()>=3) return items;
     Class cls=objc_getClass("BLSAlwaysOnDateSpecifier");
     if (!cls) { record(@"SKIP no specifier class"); return items; }
     if(!scanned.exchange(true)) for(int meta=0;meta<2;meta++){
@@ -174,19 +175,30 @@ static NSArray *experiment(NSArray *items, id interval) {
             previous=date;
         }
         NSDate *first=getDate(items[0],dateSel);
-        NSDate *next=getDate(items[1],dateSel);
-        if([next timeIntervalSinceDate:first]<10 || getFidelity(items[1],fidelitySel)!=1) { record(@"SKIP unexpected timeline"); return items; }
-        NSMutableArray *out=[items mutableCopy];
-        for(int i=1;i<=5;i++){
-            NSDate *date=[next dateByAddingTimeInterval:-6+i];
-            if ([date compare:first]!=NSOrderedDescending) return items;
-            if([date compare:[(NSDateInterval*)interval endDate]]!=NSOrderedAscending || [date timeIntervalSinceNow]<=0) { record(@"SKIP date outside future interval"); return items; }
-            id frame=make([cls alloc],factory,date,1,getDate(items[1],userSel));
+        if(getFidelity(items[1],fidelitySel)!=1) { record(@"SKIP unexpected fidelity"); return items; }
+        NSMutableArray *out=[NSMutableArray arrayWithObject:items[0]];
+        NSUInteger index=1, added=0;
+        NSDate *firstAdded=nil, *lastAdded=nil;
+        NSTimeInterval base=floor(MAX(first.timeIntervalSince1970,NSDate.date.timeIntervalSince1970));
+        for(int i=1;i<=30;i++){
+            NSDate *date=[NSDate dateWithTimeIntervalSince1970:base+i];
+            if([date compare:[(NSDateInterval*)interval endDate]]!=NSOrderedAscending) break;
+            while(index<items.count && [getDate(items[index],dateSel) compare:date]!=NSOrderedDescending) {
+                [out addObject:items[index++]];
+            }
+            NSDate *last=getDate(out.lastObject,dateSel);
+            if([last compare:date]!=NSOrderedAscending || index>=items.count) continue;
+            if(getFidelity(items[index],fidelitySel)!=1) return items;
+            id frame=make([cls alloc],factory,date,1,getDate(items[index],userSel));
             if(!frame || [frame class]!=cls || ![getDate(frame,dateSel) isEqual:date] || getFidelity(frame,fidelitySel)!=1) { record(@"SKIP factory result mismatch"); return items; }
-            [out insertObject:frame atIndex:i];
+            [out addObject:frame];
+            if(!firstAdded) firstAdded=date;
+            lastAdded=date;
+            added++;
         }
-        if(batches.fetch_add(1)>=6) return items;
-        record([NSString stringWithFormat:@"EXPERIMENT batch=%u five extra specifiers %@ to %@",batches.load(),getDate(out[1],dateSel),getDate(out[5],dateSel)]);
+        while(index<items.count) [out addObject:items[index++]];
+        if(!added || batches.fetch_add(1)>=3) return items;
+        record([NSString stringWithFormat:@"EXPERIMENT batch=%u added=%lu continuous specifiers %@ to %@",batches.load(),(unsigned long)added,firstAdded,lastAdded]);
         return out;
     } @catch(NSException *e) { record(@"SKIP exception; original timeline retained"); return items; }
 }
@@ -241,7 +253,7 @@ static NSArray *experiment(NSArray *items, id interval) {
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.2.2 - presentation interval clock experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.2.3 - bounded immediate 30-second timeline experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
