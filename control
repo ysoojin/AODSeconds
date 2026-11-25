@@ -1,8 +1,8 @@
 Package: com.aodseconds.experimental
 Name: AODSeconds Experimental
-Version: 0.1.3
+Version: 0.1.4
 Architecture: iphoneos-arm64e
-Description: Bounded lock screen seconds rendering diagnostic for iOS 17.
+Description: Read-only AOD runtime and timer diagnostic for use alongside LockSeconds.
 Maintainer: AODSeconds Project
 Author: AODSeconds Project
 Section: Tweaks
