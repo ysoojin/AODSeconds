@@ -1,107 +1,80 @@
 #import <UIKit/UIKit.h>
-#import <QuartzCore/QuartzCore.h>
+#import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
+#import <mach/mach_time.h>
 #import <os/log.h>
+#import <stdlib.h>
 
-static os_log_t logHandle;
-static NSHashTable<UIView *> *views;
-static NSTimer *timer;
-static NSDate *deadline;
-static char suffixKey;
-static BOOL updating;
-static BOOL isClock(UIView *v) {
-    for (Class c = v.class; c; c = class_getSuperclass(c)) {
-        NSString *n = NSStringFromClass(c);
-        if ([n isEqualToString:@"CSProminentTimeView"] || [n isEqualToString:@"SBFLockScreenDateView"]) return YES;
+static NSString *reportPath;
+static NSTimer *probeTimer;
+static uint64_t lastTick;
+static mach_timebase_info_data_t timebase;
+static NSUInteger count;
+static os_log_t logger;
+static void record(NSString *line) {
+    NSString *entry = [NSString stringWithFormat:@"%@ %@\n", NSDate.date, line];
+    os_log(logger,"%{public}@",line);
+    NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:reportPath];
+    if (file) {
+        @try { [file seekToEndOfFile]; [file writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]]; }
+        @catch (NSException *e) { os_log_error(logger,"write failed"); }
+        [file closeFile];
     }
-    return NO;
 }
-static BOOL visible(UIView *v) {
-    if (!v.window) return NO;
-    for (;v;v=v.superview) if (v.hidden || v.alpha < 0.01) return NO;
-    return YES;
-}
-static void updateClock(UIView *v) {
-    if (!visible(v) || updating) return;
-    updating = YES;
-    NSInteger sec = [[NSCalendar currentCalendar] component:NSCalendarUnitSecond fromDate:NSDate.date];
-    UILabel *best = nil;
-    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithArray:v.subviews];
-    while (queue.count) {
-        UIView *child = queue.lastObject;
-        [queue removeLastObject];
-        if (objc_getAssociatedObject(child,&suffixKey)) continue;
-        if ([child isKindOfClass:UILabel.class]) {
-            UILabel *l = (UILabel *)child;
-            if (visible(l) && [l.text containsString:@":"] && (!best || l.font.pointSize > best.font.pointSize)) best = l;
+static void inspectClass(Class cls) {
+    if (!cls) return;
+    record([NSString stringWithFormat:@"CLASS %@ super=%@", NSStringFromClass(cls), NSStringFromClass(class_getSuperclass(cls))]);
+    for (int meta=0; meta<2; meta++) {
+        unsigned int n=0;
+        Method *methods=class_copyMethodList(meta ? object_getClass(cls) : cls,&n);
+        for (unsigned int i=0;i<n;i++) {
+            const char *types=method_getTypeEncoding(methods[i]);
+            record([NSString stringWithFormat:@"%c %@ %s",meta?'+':'-',NSStringFromSelector(method_getName(methods[i])),types ?: ""]);
         }
-        [queue addObjectsFromArray:child.subviews];
+        free(methods);
     }
-    if (best) {
-        NSString *base = best.text;
-        NSArray *parts = [base componentsSeparatedByString:@":"];
-        if (parts.count >= 2) {
-            if (parts.count == 3) base = [[parts subarrayWithRange:NSMakeRange(0,2)] componentsJoinedByString:@":"];
-            NSString *text = [base stringByAppendingFormat:@":%ld",(long)sec];
-            if (![best.text isEqualToString:text]) {
-                best.adjustsFontSizeToFitWidth = YES;
-                best.minimumScaleFactor = 0.5;
-                best.text = text;
-                [best setNeedsDisplay];
-            }
+}
+static void scan(void) {
+    unsigned int n=0;
+    Class *classes=objc_copyClassList(&n);
+    NSUInteger found=0;
+    for(unsigned int i=0;i<n;i++) {
+        NSString *name=NSStringFromClass(classes[i]);
+        if ([name hasPrefix:@"BLSH"] || [name containsString:@"AlwaysOnPresentation"] || [name containsString:@"Flipbook"] || [name isEqualToString:@"SBBacklightController"] || [name containsString:@"AlwaysOnDisplay"]) {
+            inspectClass(classes[i]);
+            found++;
         }
-    } else {
-        UILabel *l = objc_getAssociatedObject(v,&suffixKey);
-        if (!l) {
-            l = [[UILabel alloc] init];
-            l.font = [UIFont monospacedDigitSystemFontOfSize:26 weight:UIFontWeightMedium];
-            l.textColor = UIColor.whiteColor;
-            l.textAlignment = NSTextAlignmentRight;
-            l.userInteractionEnabled = NO;
-            objc_setAssociatedObject(l,&suffixKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject(v,&suffixKey,l,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [v addSubview:l];
-            os_log(logHandle,"fallback label on %{public}@",NSStringFromClass(v.class));
-        }
-        l.frame = CGRectMake(MAX(0,CGRectGetWidth(v.bounds)-52),MAX(0,CGRectGetHeight(v.bounds)-34),50,32);
-        l.text = [NSString stringWithFormat:@":%ld",(long)sec];
-        [v bringSubviewToFront:l];
     }
-    [CATransaction flush];
-    updating = NO;
+    free(classes);
+    record([NSString stringWithFormat:@"SCAN complete candidates=%lu",(unsigned long)found]);
 }
-static void registerClock(UIView *v) {
-    if (!v.window || !isClock(v)) return;
-    if (![views containsObject:v]) {
-        [views addObject:v];
-        os_log(logHandle,"clock found: %{public}@",NSStringFromClass(v.class));
-    }
-    if (!timer) {
-        deadline = [NSDate dateWithTimeIntervalSinceNow:120];
-        timer = [NSTimer timerWithTimeInterval:1 repeats:YES block:^(NSTimer *t){
-            if (deadline.timeIntervalSinceNow <= 0) {
-                [t invalidate]; timer = nil;
-                [views removeAllObjects];
-                return;
-            }
-            for (UIView *clock in views.allObjects) updateClock(clock);
-        }];
-        [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
-    }
-    updateClock(v);
+static void tick(NSTimer *t) {
+    uint64_t now=mach_continuous_time();
+    double gap=(double)(now-lastTick)*timebase.numer/timebase.denom/1e9;
+    lastTick=now;
+    record([NSString stringWithFormat:@"TICK %lu gap=%.3fs brightness=%.3f",(unsigned long)++count,gap,UIScreen.mainScreen.brightness]);
+    if(count==10 || count==60) scan();
+    if(count>=180) { [t invalidate]; probeTimer=nil; record(@"STOP: 180 callbacks"); }
 }
-%hook UIView
-- (void)didMoveToWindow {
-    %orig;
-    if (!updating && self.window && isClock(self)) registerClock(self);
-}
-%end
 %ctor {
     @autoreleasepool {
-        logHandle = os_log_create("com.aodseconds.experimental","probe");
-        views = [NSHashTable weakObjectsHashTable];
-        os_log(logHandle,"AODSeconds 0.1.3 injected");
-        %init;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            logger=os_log_create("com.aodseconds.experimental","diagnostic");
+            reportPath=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
+            NSString *header=@"AODSeconds 0.1.4 - read-only diagnostic; no clock hooks or AOD policy changes\n";
+            NSError *error=nil;
+            if (![header writeToFile:reportPath atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
+                os_log_error(logger,"report unavailable: %{public}@",error.localizedDescription);
+            }
+            record(@"INJECTED into SpringBoard");
+            scan();
+            mach_timebase_info(&timebase);
+            lastTick=mach_continuous_time();
+            probeTimer=[NSTimer timerWithTimeInterval:1 repeats:YES block:^(NSTimer *t){ tick(t); }];
+            [[NSRunLoop mainRunLoop] addTimer:probeTimer forMode:NSRunLoopCommonModes];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+                if(probeTimer) { [probeTimer invalidate]; probeTimer=nil; record(@"STOP: five-minute deadline"); }
+            });
+        });
     }
 }
