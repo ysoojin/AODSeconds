@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <os/log.h>
 #include <atomic>
 #include <string.h>
@@ -23,6 +24,49 @@ static void record(NSString *s) {
 static BOOL matches(Class cls, SEL sel, const char *encoding) {
     Method m=cls ? class_getInstanceMethod(cls,sel) : NULL;
     return m && strcmp(method_getTypeEncoding(m),encoding)==0;
+}
+static std::atomic<bool> attempted{false};
+static NSArray *experiment(NSArray *items, id interval) {
+    if (items.count != 11 || ![interval isKindOfClass:[NSDateInterval class]]) return items;
+    if (attempted.exchange(true)) return items;
+    Class cls=objc_getClass("BLSAlwaysOnDateSpecifier");
+    if (!cls) { record(@"SKIP no specifier class"); return items; }
+    for(int meta=0;meta<2;meta++){
+        unsigned n=0; Method *ms=class_copyMethodList(meta?object_getClass(cls):cls,&n);
+        for(unsigned i=0;i<n;i++) record([NSString stringWithFormat:@"API %c %@ %s",meta?'+':'-',NSStringFromSelector(method_getName(ms[i])),method_getTypeEncoding(ms[i])]);
+        free(ms);
+    }
+    SEL dateSel=sel_registerName("date");
+    SEL fidelitySel=sel_registerName("fidelity");
+    SEL factory=sel_registerName("specifierWithDate:fidelity:");
+    if(!matches(cls,dateSel,"@16@0:8") || !matches(cls,fidelitySel,"q16@0:8") || !matches(object_getClass(cls),factory,"@32@0:8@16q24")) {
+        record(@"SKIP unverified date/fidelity factory; original timeline retained"); return items;
+    }
+    @try {
+        id (*getDate)(id,SEL)=(id(*)(id,SEL))objc_msgSend;
+        long long (*getFidelity)(id,SEL)=(long long(*)(id,SEL))objc_msgSend;
+        id (*make)(id,SEL,id,long long)=(id(*)(id,SEL,id,long long))objc_msgSend;
+        NSDate *previous=nil;
+        for(id item in items){
+            if([item class]!=cls) return items;
+            id date=getDate(item,dateSel);
+            if(![date isKindOfClass:[NSDate class]] || (previous && [previous compare:date]!=NSOrderedAscending)) return items;
+            previous=date;
+        }
+        NSDate *first=getDate(items[0],dateSel);
+        NSDate *next=getDate(items[1],dateSel);
+        if([next timeIntervalSinceDate:first]<10 || getFidelity(items[1],fidelitySel)!=1) { record(@"SKIP unexpected timeline"); return items; }
+        NSMutableArray *out=[items mutableCopy];
+        for(int i=1;i<=5;i++){
+            NSDate *date=[first dateByAddingTimeInterval:i];
+            if([date compare:[(NSDateInterval*)interval endDate]]!=NSOrderedAscending || [date timeIntervalSinceNow]<=0) { record(@"SKIP date outside future interval"); return items; }
+            id frame=make(cls,factory,date,1);
+            if(!frame || [frame class]!=cls || ![getDate(frame,dateSel) isEqual:date] || getFidelity(frame,fidelitySel)!=1) { record(@"SKIP factory result mismatch"); return items; }
+            [out insertObject:frame atIndex:i];
+        }
+        record(@"EXPERIMENT registered five extra one-second specifiers; original entries preserved");
+        return out;
+    } @catch(NSException *e) { record(@"SKIP exception; original timeline retained"); return items; }
 }
 %group Engine
 %hook BLSHAlwaysOnPresentationEngine
@@ -49,7 +93,8 @@ static BOOL matches(Class cls, SEL sel, const char *encoding) {
             record([NSString stringWithFormat:@"SPEC class=%@",NSStringFromClass([item class])]);
         }
     }
-    %orig;
+    id output=[specifiers isKindOfClass:[NSArray class]] ? experiment(specifiers,interval) : specifiers;
+    %orig(output,interval);
 }
 - (id)specifierForDate:(id)date {
     id result=%orig;
@@ -81,7 +126,7 @@ static BOOL matches(Class cls, SEL sel, const char *encoding) {
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.1.6 - read-only Flipbook timeline probe\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.1.7 - guarded five-frame timeline experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         record(@"INJECTED");
         Class e=objc_getClass("BLSHAlwaysOnPresentationEngine");
         if(matches(e,@selector(startFlipbookAndEnsureCurrent),"v16@0:8") && matches(e,@selector(startLiveUpdates),"v16@0:8")) {
