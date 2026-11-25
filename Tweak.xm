@@ -55,6 +55,14 @@ static void inspectFrame(id frame) {
 }
 static NSDate *dateFromFrame(id frame) {
     inspectFrame(frame);
+    if ([NSStringFromClass([frame class]) isEqualToString:@"BLSAlwaysOnFrameSpecifier"]) {
+        id interval=objectGetter(frame,"presentationInterval");
+        if ([interval isKindOfClass:[NSDateInterval class]]) {
+            NSDate *start=[(NSDateInterval *)interval startDate];
+            record([NSString stringWithFormat:@"CLOCK INTERVAL start=%@ end=%@",start,[(NSDateInterval *)interval endDate]]);
+            return start;
+        }
+    }
     if ([frame isKindOfClass:[NSDate class]]) return frame;
     id value=objectGetter(frame,"date");
     if (![value isKindOfClass:[NSDate class]]) value=objectGetter(frame,"presentationDate");
@@ -233,7 +241,7 @@ static NSArray *experiment(NSArray *items, id interval) {
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.2.1 - frame metadata and scoped clock experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.2.2 - presentation interval clock experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
