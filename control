@@ -1,8 +1,8 @@
 Package: com.aodseconds.experimental
 Name: AODSeconds Experimental
-Version: 0.1.7
+Version: 0.1.8
 Architecture: iphoneos-arm64e
-Description: Guarded five-frame timeline experiment for use alongside LockSeconds.
+Description: Device-confirmed initializer timeline experiment for use alongside LockSeconds.
 Maintainer: AODSeconds Project
 Author: AODSeconds Project
 Section: Tweaks
