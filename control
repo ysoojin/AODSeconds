@@ -1,8 +1,8 @@
 Package: com.aodseconds.experimental
 Name: AODSeconds Experimental
-Version: 0.1.5
+Version: 0.1.6
 Architecture: iphoneos-arm64e
-Description: Bounded experimental AOD policy probe for use alongside LockSeconds.
+Description: Read-only Flipbook timeline probe for use alongside LockSeconds.
 Maintainer: AODSeconds Project
 Author: AODSeconds Project
 Section: Tweaks
