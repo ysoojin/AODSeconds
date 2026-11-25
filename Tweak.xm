@@ -40,11 +40,29 @@ static id objectGetter(id obj, const char *name) {
     if (!matches(object_getClass(obj),sel,"@16@0:8")) return nil;
     return ((id(*)(id,SEL))objc_msgSend)(obj,sel);
 }
+static std::atomic<bool> frameScanned{false};
+static void inspectFrame(id frame) {
+    if (!frame || frameScanned.exchange(true)) return;
+    for(Class cls=object_getClass(frame);cls && cls!=[NSObject class];cls=class_getSuperclass(cls)) {
+        record([NSString stringWithFormat:@"FRAME CLASS %@",NSStringFromClass(cls)]);
+        unsigned n=0; Method *ms=class_copyMethodList(cls,&n);
+        for(unsigned i=0;i<n;i++) record([NSString stringWithFormat:@"FRAME API %@ %s",NSStringFromSelector(method_getName(ms[i])),method_getTypeEncoding(ms[i])]);
+        free(ms);
+        Ivar *iv=class_copyIvarList(cls,&n);
+        for(unsigned i=0;i<n;i++) record([NSString stringWithFormat:@"FRAME IVAR %s %s",ivar_getName(iv[i]),ivar_getTypeEncoding(iv[i])]);
+        free(iv);
+    }
+}
 static NSDate *dateFromFrame(id frame) {
+    inspectFrame(frame);
     if ([frame isKindOfClass:[NSDate class]]) return frame;
     id value=objectGetter(frame,"date");
     if (![value isKindOfClass:[NSDate class]]) value=objectGetter(frame,"presentationDate");
     if (![value isKindOfClass:[NSDate class]]) value=objectGetter(objectGetter(frame,"dateSpecifier"),"date");
+    if (![value isKindOfClass:[NSDate class]]) value=objectGetter(frame,"frameDate");
+    if (![value isKindOfClass:[NSDate class]]) value=objectGetter(frame,"targetDate");
+    if (![value isKindOfClass:[NSDate class]]) value=objectGetter(frame,"renderDate");
+    if (![value isKindOfClass:[NSDate class]]) value=objectGetter(frame,"displayDate");
     return [value isKindOfClass:[NSDate class]] ? value : nil;
 }
 static NSString *secondsString(id original, NSDate *date) {
@@ -215,7 +233,7 @@ static NSArray *experiment(NSArray *items, id interval) {
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.2.0 - scoped frame clock formatting experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.2.1 - frame metadata and scoped clock experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
