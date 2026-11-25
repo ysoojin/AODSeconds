@@ -38,14 +38,15 @@ static NSArray *experiment(NSArray *items, id interval) {
     }
     SEL dateSel=sel_registerName("date");
     SEL fidelitySel=sel_registerName("fidelity");
-    SEL factory=sel_registerName("specifierWithDate:fidelity:");
-    if(!matches(cls,dateSel,"@16@0:8") || !matches(cls,fidelitySel,"q16@0:8") || !matches(object_getClass(cls),factory,"@32@0:8@16q24")) {
-        record(@"SKIP unverified date/fidelity factory; original timeline retained"); return items;
+    SEL factory=sel_registerName("initWithDate:fidelity:userObject:");
+    SEL userSel=sel_registerName("userObject");
+    if(!matches(cls,dateSel,"@16@0:8") || !matches(cls,fidelitySel,"q16@0:8") || !matches(cls,factory,"@40@0:8@16q24@32") || !matches(cls,userSel,"@16@0:8")) {
+        record(@"SKIP unverified date/fidelity initializer; original timeline retained"); return items;
     }
     @try {
         id (*getDate)(id,SEL)=(id(*)(id,SEL))objc_msgSend;
         long long (*getFidelity)(id,SEL)=(long long(*)(id,SEL))objc_msgSend;
-        id (*make)(id,SEL,id,long long)=(id(*)(id,SEL,id,long long))objc_msgSend;
+        id (*make)(id,SEL,id,long long,id)=(id(*)(id,SEL,id,long long,id))objc_msgSend;
         NSDate *previous=nil;
         for(id item in items){
             if([item class]!=cls) return items;
@@ -58,9 +59,10 @@ static NSArray *experiment(NSArray *items, id interval) {
         if([next timeIntervalSinceDate:first]<10 || getFidelity(items[1],fidelitySel)!=1) { record(@"SKIP unexpected timeline"); return items; }
         NSMutableArray *out=[items mutableCopy];
         for(int i=1;i<=5;i++){
-            NSDate *date=[first dateByAddingTimeInterval:i];
+            NSDate *date=[next dateByAddingTimeInterval:-6+i];
+            if ([date compare:first]!=NSOrderedDescending) return items;
             if([date compare:[(NSDateInterval*)interval endDate]]!=NSOrderedAscending || [date timeIntervalSinceNow]<=0) { record(@"SKIP date outside future interval"); return items; }
-            id frame=make(cls,factory,date,1);
+            id frame=make([cls alloc],factory,date,1,getDate(items[1],userSel));
             if(!frame || [frame class]!=cls || ![getDate(frame,dateSel) isEqual:date] || getFidelity(frame,fidelitySel)!=1) { record(@"SKIP factory result mismatch"); return items; }
             [out insertObject:frame atIndex:i];
         }
@@ -126,7 +128,7 @@ static NSArray *experiment(NSArray *items, id interval) {
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.1.7 - guarded five-frame timeline experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.1.8 - verified initializer five-frame experiment\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         record(@"INJECTED");
         Class e=objc_getClass("BLSHAlwaysOnPresentationEngine");
         if(matches(e,@selector(startFlipbookAndEnsureCurrent),"v16@0:8") && matches(e,@selector(startLiveUpdates),"v16@0:8")) {
