@@ -355,12 +355,55 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
 %end
 %end
 
+static char secondsDateTag;
+static BOOL isClockSecondSpecifier(id specifier) {
+    return specifier && [objc_getAssociatedObject(specifier,&secondsDateTag) boolValue];
+}
+static long long dateSpecifierFidelity(id specifier) {
+    if(!specifier || !matches(object_getClass(specifier),@selector(fidelity),"q16@0:8")) return -1;
+    return ((long long(*)(id,SEL))objc_msgSend)(specifier,@selector(fidelity));
+}
+%group ClockBudgetPolicy
+%hook BLSHInactiveBudgetPolicy
+- (id)validateAndChargeFutureSpecifier:(id)specifier nextSpecifier:(id)next forEnvironment:(id)environment {
+    if(secondsAllowed() && isClockSecondSpecifier(specifier) && dateSpecifierFidelity(specifier)==2 && [NSStringFromClass([environment class]) isEqualToString:@"BLSHBacklightFBSceneHostEnvironment"]) {
+        static std::atomic<unsigned> accepted{0};
+        unsigned n=++accepted;
+        if(n<=8 || n%120==0) record([NSString stringWithFormat:@"CLOCK POLICY accepted tagged seconds frame %u",n]);
+        return specifier;
+    }
+    return %orig;
+}
+%end
+%end
 %group Dates
 %hook BLSHEnvironmentDatesModel
 - (void)registerSpecifiers:(id)specifiers forDateInterval:(id)interval {
     NSString *range=[interval isKindOfClass:[NSDateInterval class]] ? [NSString stringWithFormat:@"%@ to %@ duration=%.3f",[(NSDateInterval *)interval startDate],[(NSDateInterval *)interval endDate],[(NSDateInterval *)interval duration]] : NSStringFromClass([interval class]);
     NSUInteger n=[specifiers isKindOfClass:[NSArray class]] ? [(NSArray *)specifiers count] : 0;
     record([NSString stringWithFormat:@"REGISTER count=%lu interval=%@",(unsigned long)n,range]);
+    if(secondsAllowed() && n>=30 && [interval isKindOfClass:[NSDateInterval class]]) {
+        NSArray *entries=(NSArray *)specifiers;
+        NSUInteger consecutive=0;
+        NSDate *previous=nil;
+        for(id entry in entries) {
+            id date=objectGetter(entry,"date");
+            if([date isKindOfClass:[NSDate class]]) {
+                if(previous && fabs([(NSDate *)date timeIntervalSinceDate:previous]-1.0)<0.02) ++consecutive;
+                previous=date;
+            }
+        }
+        if(consecutive>=20 && consecutive>=n/2) {
+            NSUInteger marked=0;
+            for(id entry in entries) {
+                if(dateSpecifierFidelity(entry)==2) {
+                    objc_setAssociatedObject(entry,&secondsDateTag,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    ++marked;
+                }
+            }
+            record([NSString stringWithFormat:@"CLOCK POLICY tagged %lu dense seconds entries",(unsigned long)marked]);
+        }
+    }
     id output=specifiers;
     %orig(output,interval);
 }
@@ -442,7 +485,7 @@ static void inspectBudgetClasses(void) {
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.4.1 - native inactive budget inspection\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.4.2 - scoped clock frame budget validation\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); inspectBudgetClasses(); });
@@ -450,6 +493,11 @@ static void inspectBudgetClasses(void) {
         if(matches(e,@selector(startFlipbookAndEnsureCurrent),"v16@0:8") && matches(e,@selector(startLiveUpdates),"v16@0:8")) {
             %init(Engine,BLSHAlwaysOnPresentationEngine=e);
             record(@"ENGINE hooks installed");
+        }
+        Class policy=objc_getClass("BLSHInactiveBudgetPolicy");
+        if(matches(policy,@selector(validateAndChargeFutureSpecifier:nextSpecifier:forEnvironment:),"@40@0:8@16@24@32")) {
+            %init(ClockBudgetPolicy,BLSHInactiveBudgetPolicy=policy);
+            record(@"CLOCK POLICY hook installed");
         }
         Class d=objc_getClass("BLSHEnvironmentDatesModel");
         if(matches(d,@selector(registerSpecifiers:forDateInterval:),"v32@0:8@16@24") && matches(d,@selector(specifierForDate:),"@24@0:8@16")) {
