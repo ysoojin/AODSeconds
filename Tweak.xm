@@ -136,7 +136,7 @@ static BOOL secondsAllowed(void) {
 %group Frequency
 %hook BLSAlwaysOnFrequencyPerMinuteTimeline
 - (id)initWithPerMinuteUpdateFrequency:(long long)frequency identifier:(id)identifier configure:(id)configure {
-    long long effective=(clockTimelineDepth && frequency==1 && secondsAllowed())?60:frequency;
+    long long effective=(clockTimelineDepth && (frequency==1 || frequency==4) && secondsAllowed())?60:frequency;
     id result=%orig(effective,identifier,configure);
     if(clockTimelineDepth && ++frequencyLogs<=40) record([NSString stringWithFormat:@"CLOCK FREQUENCY init %lld -> %lld",frequency,effective]);
     return result;
@@ -155,10 +155,10 @@ static void adjustClockTimeline(id result) {
     unsigned char *bytes=(unsigned char *)(__bridge void *)timeline;
     long long value=0;
     memcpy(&value,bytes+offset,sizeof(value));
-    if(value==1) {
+    if(value==1 || value==4) {
         long long target=60;
         memcpy(bytes+offset,&target,sizeof(target));
-        if(++frequencyLogs<=40) record(@"CLOCK FREQUENCY returned timeline 1 -> 60");
+        if(++frequencyLogs<=40) record([NSString stringWithFormat:@"CLOCK FREQUENCY returned timeline %lld -> 60",value]);
     } else if(++frequencyLogs<=40) record([NSString stringWithFormat:@"CLOCK FREQUENCY returned timeline %lld",value]);
 }
 %group ClockTimeline
@@ -335,10 +335,23 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
 }
 %end
 %end
+%group ContinuousPower
+%hook BLSHAlwaysOnPresentationEngine
+- (BOOL)isFlipbookPowerSavingEnabled {
+    BOOL original=%orig;
+    if(original && secondsAllowed()) return NO;
+    return original;
+}
+%end
+%end
 %group Budget
 %hook BLSHInactiveProcessMinutesBudget
 - (long long)allowedFidelityAtDate:(id)date expectedFidelity:(long long)expected {
     long long actual=%orig;
+    if(expected==2 && actual<2 && secondsAllowed()) {
+        if(++budgetLogs<=40 || budgetLogs.load()%60==0) record(@"FIDELITY preserve requested seconds fidelity");
+        return 2;
+    }
     if(++budgetLogs<=12 || budgetLogs.load()%60==0 || actual<expected) record([NSString stringWithFormat:@"FIDELITY date=%@ expected=%lld actual=%lld",[date isKindOfClass:[NSDate class]] ? date : @"unknown",expected,actual]);
     return actual;
 }
@@ -358,7 +371,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.3.2 - native seconds, reduced logging overhead\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.3.3 - continuous native seconds policy\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
@@ -366,6 +379,10 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         if(matches(e,@selector(startFlipbookAndEnsureCurrent),"v16@0:8") && matches(e,@selector(startLiveUpdates),"v16@0:8")) {
             %init(Engine,BLSHAlwaysOnPresentationEngine=e);
             record(@"ENGINE hooks installed");
+        }
+        if(matches(e,@selector(isFlipbookPowerSavingEnabled),"B16@0:8") || matches(e,@selector(isFlipbookPowerSavingEnabled),"c16@0:8")) {
+            %init(ContinuousPower,BLSHAlwaysOnPresentationEngine=e);
+            record(@"ENGINE continuous flipbook policy installed");
         }
         Class d=objc_getClass("BLSHEnvironmentDatesModel");
         if(matches(d,@selector(registerSpecifiers:forDateInterval:),"v32@0:8@16@24") && matches(d,@selector(specifierForDate:),"@24@0:8@16")) {
