@@ -386,6 +386,18 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
 }
 %end
 %end
+%group SecondsBudget
+%hook BLSHInactiveProcessSecondsBudget
+- (long long)allowedFidelityAtDate:(id)date expectedFidelity:(long long)expected {
+    long long actual=%orig;
+    if(expected==2 && actual<2 && secondsAllowed()) {
+        if(++budgetLogs<=40 || budgetLogs.load()%60==0) record(@"SECONDS BUDGET preserving requested fidelity");
+        return 2;
+    }
+    return actual;
+}
+%end
+%end
 %group Spec
 %hook BLSHEnvironmentDateSpecifier
 - (id)initWithPresentationDate:(id)date fidelity:(long long)fidelity environment:(id)environment userObject:(id)userObject {
@@ -403,7 +415,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.3.7 - flipbook presentation with settings toggle\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.3.9 - seconds budget and settings toggle\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
@@ -422,6 +434,11 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
             %init(Budget,BLSHInactiveProcessMinutesBudget=b);
             record(@"BUDGET hook installed");
         }
+        Class sb=objc_getClass("BLSHInactiveProcessSecondsBudget");
+        if(matches(sb,@selector(allowedFidelityAtDate:expectedFidelity:),"q32@0:8@16q24")) {
+            %init(SecondsBudget,BLSHInactiveProcessSecondsBudget=sb);
+            record(@"SECONDS BUDGET hook installed");
+        } else record(@"SECONDS BUDGET signature unavailable");
         Class s=objc_getClass("BLSHEnvironmentDateSpecifier");
         if(matches(s,@selector(initWithPresentationDate:fidelity:environment:userObject:),"@48@0:8@16q24@32@40")) {
             %init(Spec,BLSHEnvironmentDateSpecifier=s);
