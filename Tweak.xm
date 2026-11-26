@@ -161,6 +161,33 @@ static void adjustClockTimeline(id result) {
         if(++frequencyLogs<=40) record([NSString stringWithFormat:@"CLOCK FREQUENCY returned timeline %lld -> 60",value]);
     } else if(++frequencyLogs<=40) record([NSString stringWithFormat:@"CLOCK FREQUENCY returned timeline %lld",value]);
 }
+static char clockTimelineTag;
+static BOOL markedSecondsTimeline(id timeline) {
+    return timeline && [objc_getAssociatedObject(timeline,&clockTimelineTag) boolValue];
+}
+%group ClockFidelity
+%hook BLSAlwaysOnFrequencyPerMinuteTimeline
+- (long long)requestedFidelityForStartEntryInDateInterval:(id)interval withPreviousEntry:(id)previous {
+    long long original=%orig;
+    if(markedSecondsTimeline(self) && secondsAllowed() && original==1) return 2;
+    return original;
+}
+%end
+%end
+%group FrameFidelity
+%hook BLSAlwaysOnFrameSpecifier
+- (void)setGrantedFidelity:(long long)fidelity {
+    id interval=objectGetter(self,"presentationInterval");
+    long long requested=0;
+    if(matches(object_getClass(self),@selector(requestedFidelity),"q16@0:8")) requested=((long long(*)(id,SEL))objc_msgSend)(self,@selector(requestedFidelity));
+    if(fidelity==1 && requested==2 && secondsAllowed() && [interval isKindOfClass:[NSDateInterval class]] && [(NSDateInterval *)interval duration]>0 && [(NSDateInterval *)interval duration]<=1.01) {
+        %orig(2);
+        return;
+    }
+    %orig;
+}
+%end
+%end
 %group ClockTimeline
 %hook SBFLockScreenDateViewController
 - (id)_timelinesForDateInterval:(id)interval {
@@ -168,7 +195,10 @@ static void adjustClockTimeline(id result) {
     ++clockTimelineDepth;
     @try { result=%orig; }
     @finally { --clockTimelineDepth; }
-    if([interval isKindOfClass:[NSDateInterval class]]) adjustClockTimeline(result);
+    if([interval isKindOfClass:[NSDateInterval class]]) {
+        adjustClockTimeline(result);
+        if(secondsAllowed() && [result isKindOfClass:[NSArray class]] && [result count]==1 && object_getClass([result firstObject])==objc_getClass("BLSAlwaysOnFrequencyPerMinuteTimeline")) objc_setAssociatedObject([result firstObject],&clockTimelineTag,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     if(++timelineProbes<=3) {
         @try {
             record([NSString stringWithFormat:@"CLOCK TIMELINE request=%@ resultClass=%@",[interval isKindOfClass:[NSDateInterval class]]?interval:@"unknown",NSStringFromClass([result class])]);
@@ -229,6 +259,11 @@ static void adjustClockTimeline(id result) {
 %end
 %end
 static void installClock(void) {
+    Class timelineClass=objc_getClass("BLSAlwaysOnFrequencyPerMinuteTimeline");
+    if(matches(timelineClass,@selector(requestedFidelityForStartEntryInDateInterval:withPreviousEntry:),"q32@0:8@16@24")) { %init(ClockFidelity,BLSAlwaysOnFrequencyPerMinuteTimeline=timelineClass); }
+    Class frameClass=objc_getClass("BLSAlwaysOnFrameSpecifier");
+    if(matches(frameClass,@selector(setGrantedFidelity:),"v24@0:8q16")) { %init(FrameFidelity,BLSAlwaysOnFrameSpecifier=frameClass); }
+    record(@"CLOCK frame fidelity policy checked");
     Class frequencyClass=objc_getClass("BLSAlwaysOnFrequencyPerMinuteTimeline");
     if(matches(frequencyClass,@selector(initWithPerMinuteUpdateFrequency:identifier:configure:),"@40@0:8q16@24@?32")) {
         %init(Frequency,BLSAlwaysOnFrequencyPerMinuteTimeline=frequencyClass);
@@ -371,7 +406,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.3.3 - continuous native seconds policy\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.3.4 - preserve native one-second frame fidelity\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
