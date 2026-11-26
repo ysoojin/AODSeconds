@@ -342,23 +342,11 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         return out;
     } @catch(NSException *e) { record(@"SKIP exception; original timeline retained"); return items; }
 }
-static thread_local bool switchingToLive=false;
 %group Engine
 %hook BLSHAlwaysOnPresentationEngine
 - (void)startFlipbookAndEnsureCurrent {
     record(@"ENGINE startFlipbookAndEnsureCurrent");
-    if(switchingToLive) { %orig; return; }
     %orig;
-    if(![NSThread isMainThread] || !secondsAllowed()) return;
-    SEL live=sel_registerName("startLiveUpdates");
-    if(!matches(object_getClass(self),live,"v16@0:8")) return;
-    switchingToLive=true;
-    @try {
-        record(@"ENGINE requesting native live updates after flipbook start");
-        ((void(*)(id,SEL))objc_msgSend)(self,live);
-    } @catch(NSException *e) {
-        record(@"ENGINE live request failed; original flipbook retained");
-    } @finally { switchingToLive=false; }
 }
 - (void)startLiveUpdates {
     record(@"ENGINE startLiveUpdates");
@@ -366,6 +354,7 @@ static thread_local bool switchingToLive=false;
 }
 %end
 %end
+
 %group Dates
 %hook BLSHEnvironmentDatesModel
 - (void)registerSpecifiers:(id)specifiers forDateInterval:(id)interval {
@@ -379,15 +368,6 @@ static thread_local bool switchingToLive=false;
     id result=%orig;
     record([NSString stringWithFormat:@"LOOKUP date=%@ resultClass=%@",[date isKindOfClass:[NSDate class]] ? date : @"unknown",NSStringFromClass([result class])]);
     return result;
-}
-%end
-%end
-%group ContinuousPower
-%hook BLSHAlwaysOnPresentationEngine
-- (BOOL)isFlipbookPowerSavingEnabled {
-    BOOL original=%orig;
-    if(original && secondsAllowed()) return NO;
-    return original;
 }
 %end
 %end
@@ -418,7 +398,7 @@ static thread_local bool switchingToLive=false;
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.3.5 - native live presentation request\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.3.6 - restore native flipbook presentation\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
@@ -426,10 +406,6 @@ static thread_local bool switchingToLive=false;
         if(matches(e,@selector(startFlipbookAndEnsureCurrent),"v16@0:8") && matches(e,@selector(startLiveUpdates),"v16@0:8")) {
             %init(Engine,BLSHAlwaysOnPresentationEngine=e);
             record(@"ENGINE hooks installed");
-        }
-        if(matches(e,@selector(isFlipbookPowerSavingEnabled),"B16@0:8") || matches(e,@selector(isFlipbookPowerSavingEnabled),"c16@0:8")) {
-            %init(ContinuousPower,BLSHAlwaysOnPresentationEngine=e);
-            record(@"ENGINE continuous flipbook policy installed");
         }
         Class d=objc_getClass("BLSHEnvironmentDatesModel");
         if(matches(d,@selector(registerSpecifiers:forDateInterval:),"v32@0:8@16@24") && matches(d,@selector(specifierForDate:),"@24@0:8@16")) {
