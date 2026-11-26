@@ -12,7 +12,7 @@ static NSObject *guard;
 static os_log_t logger;
 static std::atomic<unsigned> events{0};
 static void record(NSString *s) {
-    if (++events > 1200) return;
+    if (++events > 1600) return;
     os_log(logger,"%{public}@",s);
     @synchronized(guard) {
         NSFileHandle *h=[NSFileHandle fileHandleForWritingAtPath:path];
@@ -123,10 +123,48 @@ static void inspectTimeline(id value, unsigned depth) {
         }
     }
 }
+static thread_local unsigned clockTimelineDepth=0;
+static std::atomic<unsigned> frequencyLogs{0};
+static BOOL secondsAllowed(void) {
+    NSProcessInfo *info=[NSProcessInfo processInfo];
+    return !info.lowPowerModeEnabled && info.thermalState<NSProcessInfoThermalStateSerious;
+}
+%group Frequency
+%hook BLSAlwaysOnFrequencyPerMinuteTimeline
+- (id)initWithPerMinuteUpdateFrequency:(long long)frequency identifier:(id)identifier configure:(id)configure {
+    long long effective=(clockTimelineDepth && frequency==1 && secondsAllowed())?60:frequency;
+    id result=%orig(effective,identifier,configure);
+    if(clockTimelineDepth && ++frequencyLogs<=40) record([NSString stringWithFormat:@"CLOCK FREQUENCY init %lld -> %lld",frequency,effective]);
+    return result;
+}
+%end
+%end
+static void adjustClockTimeline(id result) {
+    if(!secondsAllowed() || ![result isKindOfClass:[NSArray class]] || [result count]!=1) return;
+    id timeline=[result firstObject];
+    Class cls=objc_getClass("BLSAlwaysOnFrequencyPerMinuteTimeline");
+    if(!cls || object_getClass(timeline)!=cls) return;
+    Ivar iv=class_getInstanceVariable(cls,"_frequencyPerMinute");
+    if(!iv || strcmp(ivar_getTypeEncoding(iv),"q")!=0) return;
+    ptrdiff_t offset=ivar_getOffset(iv);
+    if(offset<0 || (size_t)offset+sizeof(long long)>class_getInstanceSize(cls)) return;
+    unsigned char *bytes=(unsigned char *)(__bridge void *)timeline;
+    long long value=0;
+    memcpy(&value,bytes+offset,sizeof(value));
+    if(value==1) {
+        long long target=60;
+        memcpy(bytes+offset,&target,sizeof(target));
+        if(++frequencyLogs<=40) record(@"CLOCK FREQUENCY returned timeline 1 -> 60");
+    } else if(++frequencyLogs<=40) record([NSString stringWithFormat:@"CLOCK FREQUENCY returned timeline %lld",value]);
+}
 %group ClockTimeline
 %hook SBFLockScreenDateViewController
 - (id)_timelinesForDateInterval:(id)interval {
-    id result=%orig;
+    id result=nil;
+    ++clockTimelineDepth;
+    @try { result=%orig; }
+    @finally { --clockTimelineDepth; }
+    if([interval isKindOfClass:[NSDateInterval class]]) adjustClockTimeline(result);
     if(++timelineProbes<=3) {
         @try {
             record([NSString stringWithFormat:@"CLOCK TIMELINE request=%@ resultClass=%@",[interval isKindOfClass:[NSDateInterval class]]?interval:@"unknown",NSStringFromClass([result class])]);
@@ -187,6 +225,11 @@ static void inspectTimeline(id value, unsigned depth) {
 %end
 %end
 static void installClock(void) {
+    Class frequencyClass=objc_getClass("BLSAlwaysOnFrequencyPerMinuteTimeline");
+    if(matches(frequencyClass,@selector(initWithPerMinuteUpdateFrequency:identifier:configure:),"@40@0:8q16@24@?32")) {
+        %init(Frequency,BLSAlwaysOnFrequencyPerMinuteTimeline=frequencyClass);
+        record(@"CLOCK frequency hook installed");
+    } else record(@"CLOCK frequency initializer unavailable; scoped returned timeline fallback only");
     Class c=objc_getClass("SBFLockScreenDateViewController");
     if(matches(c,@selector(_timelinesForDateInterval:),"@24@0:8@16")) {
         %init(ClockTimeline,SBFLockScreenDateViewController=c);
@@ -311,7 +354,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.2.4 - native clock timeline diagnostic\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.3.0 - native clock sixty updates per minute\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
