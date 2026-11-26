@@ -342,11 +342,23 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         return out;
     } @catch(NSException *e) { record(@"SKIP exception; original timeline retained"); return items; }
 }
+static thread_local bool switchingToLive=false;
 %group Engine
 %hook BLSHAlwaysOnPresentationEngine
 - (void)startFlipbookAndEnsureCurrent {
     record(@"ENGINE startFlipbookAndEnsureCurrent");
+    if(switchingToLive) { %orig; return; }
     %orig;
+    if(![NSThread isMainThread] || !secondsAllowed()) return;
+    SEL live=sel_registerName("startLiveUpdates");
+    if(!matches(object_getClass(self),live,"v16@0:8")) return;
+    switchingToLive=true;
+    @try {
+        record(@"ENGINE requesting native live updates after flipbook start");
+        ((void(*)(id,SEL))objc_msgSend)(self,live);
+    } @catch(NSException *e) {
+        record(@"ENGINE live request failed; original flipbook retained");
+    } @finally { switchingToLive=false; }
 }
 - (void)startLiveUpdates {
     record(@"ENGINE startLiveUpdates");
@@ -406,7 +418,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.3.4 - preserve native one-second frame fidelity\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.3.5 - native live presentation request\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
