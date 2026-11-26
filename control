@@ -1,6 +1,6 @@
 Package: com.aodseconds.experimental
 Name: AODSeconds Experimental
-Version: 0.3.5
+Version: 0.3.6
 Architecture: iphoneos-arm64e
 Description: Native clock sixty updates per minute for use alongside LockSeconds.
 Maintainer: AODSeconds Project
