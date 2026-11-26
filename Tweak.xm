@@ -16,7 +16,7 @@ static std::atomic<unsigned> stringLogs{0};
 static std::atomic<unsigned> intervalLogs{0};
 static std::atomic<unsigned> labelLogs{0};
 static void record(NSString *s) {
-    if (++events > 1600) return;
+    if (++events > 3600) return;
     os_log(logger,"%{public}@",s);
     @synchronized(guard) {
         NSFileHandle *h=[NSFileHandle fileHandleForWritingAtPath:path];
@@ -384,10 +384,39 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
 }
 %end
 %end
+static std::atomic<unsigned> secondsBudgetCalls{0};
+static std::atomic<bool> budgetMetadataDone{false};
+static void inspectBudgetClass(Class cls) {
+    if(!cls) return;
+    NSString *name=NSStringFromClass(cls);
+    unsigned n=0;
+    Method *methods=class_copyMethodList(cls,&n);
+    for(unsigned i=0;i<MIN(n,70);i++) record([NSString stringWithFormat:@"BUDGET API %@ %@ %s",name,NSStringFromSelector(method_getName(methods[i])),method_getTypeEncoding(methods[i])]);
+    free(methods);
+    Ivar *ivars=class_copyIvarList(cls,&n);
+    for(unsigned i=0;i<MIN(n,40);i++) record([NSString stringWithFormat:@"BUDGET IVAR %@ %s %s",name,ivar_getName(ivars[i]),ivar_getTypeEncoding(ivars[i])]);
+    free(ivars);
+}
+static void inspectBudgetClasses(void) {
+    if(budgetMetadataDone.exchange(true)) return;
+    unsigned count=0;
+    Class *classes=objc_copyClassList(&count);
+    unsigned logged=0;
+    for(unsigned i=0;i<count && logged<20;i++) {
+        const char *name=class_getName(classes[i]);
+        if(name && strstr(name,"BLSH") && (strstr(name,"Budget") || strstr(name,"PresentationEngine"))) {
+            inspectBudgetClass(classes[i]);
+            ++logged;
+        }
+    }
+    free(classes);
+}
 %group SecondsBudget
 %hook BLSHInactiveProcessSecondsBudget
 - (long long)allowedFidelityAtDate:(id)date expectedFidelity:(long long)expected {
     long long actual=%orig;
+    unsigned call=++secondsBudgetCalls;
+    if(call<=12 || call%60==0 || (actual<expected && call<=300)) record([NSString stringWithFormat:@"SECONDS BUDGET call=%u date=%@ expected=%lld actual=%lld",call,[date isKindOfClass:[NSDate class]]?date:@"unknown",expected,actual]);
     if(expected==2 && actual<2 && secondsAllowed()) {
         if(++budgetLogs<=40 || budgetLogs.load()%60==0) record(@"SECONDS BUDGET preserving requested fidelity");
         return 2;
@@ -413,10 +442,10 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.4.0 - user controlled seconds without additional power or thermal gating\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.4.1 - native inactive budget inspection\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
-        dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
+        dispatch_async(dispatch_get_main_queue(), ^{ installClock(); inspectBudgetClasses(); });
         Class e=objc_getClass("BLSHAlwaysOnPresentationEngine");
         if(matches(e,@selector(startFlipbookAndEnsureCurrent),"v16@0:8") && matches(e,@selector(startLiveUpdates),"v16@0:8")) {
             %init(Engine,BLSHAlwaysOnPresentationEngine=e);
