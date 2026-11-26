@@ -8,3 +8,6 @@ AODSeconds_FILES = Tweak.xm
 AODSeconds_CFLAGS = -fobjc-arc
 AODSeconds_FRAMEWORKS = UIKit QuartzCore Foundation
 include $(THEOS_MAKE_PATH)/tweak.mk
+
+SUBPROJECTS += aodsecondsprefs
+include $(THEOS_MAKE_PATH)/aggregate.mk
