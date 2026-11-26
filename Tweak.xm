@@ -81,7 +81,7 @@ static NSString *secondsString(id original, NSDate *date) {
     if (![re numberOfMatchesInString:s options:0 range:NSMakeRange(0,s.length)]) return s;
     NSArray *parts=[s componentsSeparatedByString:@":"];
     NSInteger second=[[NSCalendar currentCalendar] component:NSCalendarUnitSecond fromDate:date];
-    return [NSString stringWithFormat:@"%@:%@:%ld",parts[0],parts[1],(long)second];
+    return [NSString stringWithFormat:@"%@:%@:%02ld",parts[0],parts[1],(long)second];
 }
 static std::atomic<unsigned> timelineProbes{0};
 static NSMutableSet *timelineClasses;
@@ -354,7 +354,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.3.0 - native clock sixty updates per minute\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.3.1 - native clock sixty updates per minute, two-digit seconds\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
