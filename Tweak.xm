@@ -11,6 +11,10 @@ static NSString *path;
 static NSObject *guard;
 static os_log_t logger;
 static std::atomic<unsigned> events{0};
+static std::atomic<unsigned> frameLogs{0};
+static std::atomic<unsigned> stringLogs{0};
+static std::atomic<unsigned> intervalLogs{0};
+static std::atomic<unsigned> labelLogs{0};
 static void record(NSString *s) {
     if (++events > 1600) return;
     os_log(logger,"%{public}@",s);
@@ -60,7 +64,7 @@ static NSDate *dateFromFrame(id frame) {
         id interval=objectGetter(frame,"presentationInterval");
         if ([interval isKindOfClass:[NSDateInterval class]]) {
             NSDate *start=[(NSDateInterval *)interval startDate];
-            record([NSString stringWithFormat:@"CLOCK INTERVAL start=%@ end=%@",start,[(NSDateInterval *)interval endDate]]);
+            if(++intervalLogs<=8 || intervalLogs.load()%60==0) record([NSString stringWithFormat:@"CLOCK INTERVAL start=%@ end=%@",start,[(NSDateInterval *)interval endDate]]);
             return start;
         }
     }
@@ -208,7 +212,7 @@ static void adjustClockTimeline(id result) {
                 } else l.text=after;
                 record([NSString stringWithFormat:@"CLOCK LABEL %@ -> %@",before,after]);
             } else record([NSString stringWithFormat:@"CLOCK LABEL unchanged %@",before]);
-        } else record([NSString stringWithFormat:@"CLOCK LABEL unavailable class=%@",NSStringFromClass([label class])]);
+        } else if(++labelLogs<=4) record([NSString stringWithFormat:@"CLOCK LABEL unavailable class=%@",NSStringFromClass([label class])]);
     } @finally { frameDate=previous; }
 }
 %end
@@ -219,7 +223,7 @@ static void adjustClockTimeline(id result) {
     id original=%orig;
     if (![NSThread isMainThread] || !frameDate) return original;
     NSString *out=secondsString(original,frameDate);
-    if (out && ![out isEqual:original]) record([NSString stringWithFormat:@"CLOCK STRING %@ -> %@",original,out]);
+    if (out && ![out isEqual:original] && (++stringLogs<=8 || stringLogs.load()%120==0)) record([NSString stringWithFormat:@"CLOCK STRING %@ -> %@",original,out]);
     return out;
 }
 %end
@@ -335,7 +339,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
 %hook BLSHInactiveProcessMinutesBudget
 - (long long)allowedFidelityAtDate:(id)date expectedFidelity:(long long)expected {
     long long actual=%orig;
-    if(++budgetLogs<=12) record([NSString stringWithFormat:@"FIDELITY date=%@ expected=%lld actual=%lld",[date isKindOfClass:[NSDate class]] ? date : @"unknown",expected,actual]);
+    if(++budgetLogs<=12 || budgetLogs.load()%60==0 || actual<expected) record([NSString stringWithFormat:@"FIDELITY date=%@ expected=%lld actual=%lld",[date isKindOfClass:[NSDate class]] ? date : @"unknown",expected,actual]);
     return actual;
 }
 %end
@@ -344,7 +348,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
 %hook BLSHEnvironmentDateSpecifier
 - (id)initWithPresentationDate:(id)date fidelity:(long long)fidelity environment:(id)environment userObject:(id)userObject {
     id result=%orig;
-    record([NSString stringWithFormat:@"FRAME date=%@ fidelity=%lld environmentClass=%@",[date isKindOfClass:[NSDate class]] ? date : @"unknown",fidelity,NSStringFromClass([environment class])]);
+    if(++frameLogs<=12 || frameLogs.load()%60==0) record([NSString stringWithFormat:@"FRAME date=%@ fidelity=%lld environmentClass=%@",[date isKindOfClass:[NSDate class]] ? date : @"unknown",fidelity,NSStringFromClass([environment class])]);
     return result;
 }
 %end
@@ -354,7 +358,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.3.1 - native clock sixty updates per minute, two-digit seconds\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.3.2 - native seconds, reduced logging overhead\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
