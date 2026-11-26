@@ -131,9 +131,7 @@ static thread_local unsigned clockTimelineDepth=0;
 static std::atomic<unsigned> frequencyLogs{0};
 static BOOL tweakEnabled=YES;
 static BOOL secondsAllowed(void) {
-    if(!tweakEnabled) return NO;
-    NSProcessInfo *info=[NSProcessInfo processInfo];
-    return !info.lowPowerModeEnabled && info.thermalState<NSProcessInfoThermalStateSerious;
+    return tweakEnabled;
 }
 %group Frequency
 %hook BLSAlwaysOnFrequencyPerMinuteTimeline
@@ -415,7 +413,7 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.3.9 - seconds budget and settings toggle\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.4.0 - user controlled seconds without additional power or thermal gating\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
