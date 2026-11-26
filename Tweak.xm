@@ -129,7 +129,9 @@ static void inspectTimeline(id value, unsigned depth) {
 }
 static thread_local unsigned clockTimelineDepth=0;
 static std::atomic<unsigned> frequencyLogs{0};
+static BOOL tweakEnabled=YES;
 static BOOL secondsAllowed(void) {
+    if(!tweakEnabled) return NO;
     NSProcessInfo *info=[NSProcessInfo processInfo];
     return !info.lowPowerModeEnabled && info.thermalState<NSProcessInfoThermalStateSerious;
 }
@@ -213,7 +215,7 @@ static BOOL markedSecondsTimeline(id timeline) {
 %hook SBFLockScreenDateViewController
 - (void)_updateWithFrameSpecifier:(id)specifier {
     NSDate *date=dateFromFrame(specifier);
-    BOOL scoped=[NSThread isMainThread] && date && [date timeIntervalSinceNow]>-60 && [date timeIntervalSinceNow]<610;
+    BOOL scoped=tweakEnabled && [NSThread isMainThread] && date && [date timeIntervalSinceNow]>-60 && [date timeIntervalSinceNow]<610;
     if (++clockCalls<=80) record([NSString stringWithFormat:@"CLOCK FRAME class=%@ date=%@ scoped=%d",NSStringFromClass([specifier class]),date,scoped]);
     if (!scoped) { %orig; return; }
     NSDate *previous=frameDate;
@@ -251,7 +253,7 @@ static BOOL markedSecondsTimeline(id timeline) {
 %hook CSProminentTimeView
 - (id)_timeString {
     id original=%orig;
-    if (![NSThread isMainThread] || !frameDate) return original;
+    if (!tweakEnabled || ![NSThread isMainThread] || !frameDate) return original;
     NSString *out=secondsString(original,frameDate);
     if (out && ![out isEqual:original] && (++stringLogs<=8 || stringLogs.load()%120==0)) record([NSString stringWithFormat:@"CLOCK STRING %@ -> %@",original,out]);
     return out;
@@ -395,10 +397,13 @@ static __attribute__((unused)) NSArray *experiment(NSArray *items, id interval) 
 %end
 %ctor {
     @autoreleasepool {
+        NSDictionary *prefs=[NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Media/AODSeconds-settings.plist"];
+        tweakEnabled=prefs[@"Enabled"] ? [prefs[@"Enabled"] boolValue] : YES;
+        if(!tweakEnabled) return;
         logger=os_log_create("com.aodseconds.experimental","timeline");
         guard=[NSObject new];
         path=@"/var/mobile/Media/AODSeconds-diagnostic.txt";
-        [@"AODSeconds 0.3.6 - restore native flipbook presentation\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"AODSeconds 0.3.7 - flipbook presentation with settings toggle\n" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         mach_timebase_info(&tb);
         record(@"INJECTED");
         dispatch_async(dispatch_get_main_queue(), ^{ installClock(); });
